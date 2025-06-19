@@ -95,6 +95,22 @@ deno run --allow-net --allow-read --allow-write --allow-run --allow-env tty-slid
 ./tty-slide.ts --source=waifu --nsfw --tags=ecchi
 ```
 
+### Tips
+
+You can create a standalone executable usind Deno that will contain and run this script on your machine or any other system that supports the binary.
+
+```bash
+# Creates a binary that will start a terminal emulator and run the slideshow with --colors and --fill
+deno compile --allow-net --allow-read --allow-write --allow-run --allow-env ./tty-slide.ts --colors --fill
+```
+
+You can also create an alias
+
+```bash
+# In you config file such as .bashrc or .zshrc add this line to start a slide with images from pexels, a 1 minute interval, colors and captions
+alias tty-slide="/path/to/tty-slide/tty-slide.ts --caption --colors --interval=60 --source=pexels"
+```
+
 ## Command Line Options
 
 | Option | Description | Default |
