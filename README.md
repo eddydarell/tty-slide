@@ -1,6 +1,7 @@
 # TTY Slide - Terminal Multi-Source Slideshow
 
 A powerful terminal-based slideshow that fetches images from multiple APIs (Waifu API, Pexels API, etc.) and displays them as beautiful ASCII art using jp2a.
+Use with a modern terminal emulator to proerly enjoy all the colors when the `--colors` flag is enabled.
 
 ## Features
 
