@@ -1,4 +1,4 @@
-#!/usr/bin/env -S deno run --allow-net --allow-read --allow-write --allow-run --allow-env
+#!/usr/bin/env deno
 
 /**
  * TTY Slide - Terminal slideshow with multiple image sources
@@ -13,16 +13,20 @@
  *
  * @example
  * ```bash
+ * # Run with full permissions:
  * deno run --allow-net --allow-read --allow-write --allow-run --allow-env tty-slide.ts --colors
  *
- * # Or simply:
+ * # Or make executable and run directly (requires deno.json configuration):
  * chmod +x tty-slide.ts
  * ./tty-slide.ts --source=pexels --tags=nature,landscape --interval=5 --colors --fill
+ *
+ * # Alternative: use deno task (if configured in deno.json)
+ * deno task tty-slide --colors --caption
  * ```
  *
  * @author Eddy Ntambwe <eddydarell@gmail.com>
- * @license MIT
- * @version 1.0.0
+ * @license GNU General Public License v2.0
+ * @version 1.1.0
  */
 
 import {
@@ -118,6 +122,7 @@ interface SlideImage {
   source: string;
   tags?: string[];
   description?: string;
+  isNsfw?: boolean;
 }
 
 interface Config {
@@ -213,6 +218,45 @@ class DependencyChecker {
     }
   }
 
+  static async getJp2aVersion(): Promise<string | null> {
+    try {
+      const versionCheck = new Deno.Command("jp2a", {
+        args: ["--version"],
+        stdout: "piped",
+        stderr: "piped",
+      });
+      const output = await versionCheck.output();
+
+      if (output.code !== 0) {
+        return null;
+      }
+
+      // jp2a outputs version to stderr, not stdout
+      const versionText = new TextDecoder().decode(output.stderr);
+      // Extract version number from output like "jp2a 1.3.2" or "jp2a version 1.3.2"
+      const versionMatch = versionText.match(/jp2a.*?(\d+\.\d+\.\d+)/i);
+      return versionMatch ? versionMatch[1] : null;
+    } catch (error) {
+      Logger.error("Failed to get jp2a version", error as Error);
+      return null;
+    }
+  }
+
+  static compareVersions(version1: string, version2: string): number {
+    const v1Parts = version1.split('.').map(Number);
+    const v2Parts = version2.split('.').map(Number);
+
+    for (let i = 0; i < Math.max(v1Parts.length, v2Parts.length); i++) {
+      const v1Part = v1Parts[i] || 0;
+      const v2Part = v2Parts[i] || 0;
+
+      if (v1Part < v2Part) return -1;
+      if (v1Part > v2Part) return 1;
+    }
+
+    return 0;
+  }
+
   static async checkAllDependencies(): Promise<void> {
     Logger.info("Checking system dependencies...");
 
@@ -226,6 +270,20 @@ class DependencyChecker {
       Deno.exit(1);
     }
 
+    // Check jp2a version and warn if too old
+    const jp2aVersion = await this.getJp2aVersion();
+    if (jp2aVersion) {
+      Logger.info(`jp2a version: ${jp2aVersion}`);
+
+      if (this.compareVersions(jp2aVersion, "1.3.2") < 0) {
+        console.warn(`${yellow("⚠️  WARNING:")} jp2a version ${jp2aVersion} detected. Version 1.3.2+ is recommended.`);
+        console.warn(`${yellow("   The -c (center) flag is not available in older versions.")}`);
+        console.warn(`${yellow("   Images will be centered manually by TTY-Slide.")}\n`);
+      }
+    } else {
+      Logger.warn("Could not determine jp2a version");
+    }
+
     Logger.success("All dependencies satisfied");
   }
 }
@@ -236,7 +294,7 @@ class ConfigManager {
     source: "random",
     includeNsfw: false,
     intervalSeconds: 10,
-    outputDir: "./slides",
+    outputDir: "./slides", // Will be updated by getDefaultImagesDirectory
     colors: false,
     fill: false,
     caption: false,
@@ -244,8 +302,30 @@ class ConfigManager {
     timeout: 30000,
   };
 
-  static parseArgs(): Config {
+  private static async getDefaultImagesDirectory(): Promise<string> {
+    try {
+      // Try to get user's home directory
+      const homeDir = Deno.env.get("HOME");
+      if (homeDir) {
+        const imagesDir = `${homeDir}/Pictures`;
+        try {
+          await Deno.stat(imagesDir);
+          return `${imagesDir}/TTY-Slides`;
+        } catch {
+          // Pictures directory doesn't exist, fall back to current directory
+        }
+      }
+    } catch {
+      // Fall back to current directory if anything fails
+    }
+    return "./slides";
+  }
+
+  static async parseArgs(): Promise<Config> {
     const config = { ...this.DEFAULT_CONFIG };
+
+    // Set default output directory
+    config.outputDir = await this.getDefaultImagesDirectory();
 
     config.noSave = Deno.args.includes("--no-save");
     config.includeNsfw = Deno.args.includes("--nsfw");
@@ -429,6 +509,7 @@ class WaifuFetcher implements ImageFetcher {
           caption: image.artist ? `Artist: ${image.artist.name}` : undefined,
           tags: image.tags?.map(tag => tag.name) || [],
           description: image.tags?.map(tag => tag.description).filter(desc => desc).join(" • ") || undefined,
+          isNsfw: image.is_nsfw, // Add NSFW flag from API
         };
       } catch (error) {
         Logger.warn(
@@ -751,13 +832,31 @@ class ImageProcessor {
     try {
       await Deno.writeFile(tmpFile, buffer);
 
-      const args = ["-c", "-b"];
+      // Check jp2a version to determine if -c flag is supported
+      const jp2aVersion = await DependencyChecker.getJp2aVersion();
+      const supportsCenterFlag = jp2aVersion && DependencyChecker.compareVersions(jp2aVersion, "1.3.2") >= 0;
+
+      const args = ["-b"]; // Always include -b (inverted)
+
+      // Only add -c flag if supported (for centering)
+      if (supportsCenterFlag) {
+        args.push("-c");
+      }
 
       if (config.colors) {
         args.push("--colors");
       }
 
+      // Always reserve space for progress bar and controls header, then size image to fit
+      const terminalSize = TerminalUtils.getTerminalSize();
+      const reservedLines = 3; // Controls header + progress bar + padding
+      const availableHeight = Math.max(10, terminalSize.rows - reservedLines);
+
+      // Use manual sizing to preserve top content and fit available space
+      args.push("--height=" + availableHeight);
+
       if (config.fill) {
+        // jp2a --fill flag: fills background of ASCII art with ANSI color
         args.push("--fill");
       }
 
@@ -765,17 +864,38 @@ class ImageProcessor {
 
       Logger.debug(`jp2a command: jp2a ${args.join(" ")}`);
 
-      const jp2a = new Deno.Command("jp2a", {
-        args: args,
-        stdout: "inherit",
-        stderr: "piped",
-      });
+      if (supportsCenterFlag) {
+        // Let jp2a handle everything (centering, sizing) and output directly to terminal
+        const jp2a = new Deno.Command("jp2a", {
+          args: args,
+          stdout: "inherit", // Direct output to terminal for best sizing
+          stderr: "piped",
+        });
 
-      const output = await jp2a.output();
+        const output = await jp2a.output();
 
-      if (output.code !== 0) {
-        const errorText = new TextDecoder().decode(output.stderr);
-        throw new Error(`jp2a failed: ${errorText}`);
+        if (output.code !== 0) {
+          const errorText = new TextDecoder().decode(output.stderr);
+          throw new Error(`jp2a failed: ${errorText}`);
+        }
+      } else {
+        // For older jp2a versions, capture output and center manually
+        const jp2a = new Deno.Command("jp2a", {
+          args: args,
+          stdout: "piped",
+          stderr: "piped",
+        });
+
+        const output = await jp2a.output();
+
+        if (output.code !== 0) {
+          const errorText = new TextDecoder().decode(output.stderr);
+          throw new Error(`jp2a failed: ${errorText}`);
+        }
+
+        // Get the ASCII output and center it manually
+        const asciiOutput = new TextDecoder().decode(output.stdout);
+        this.centerAndDisplayAscii(asciiOutput);
       }
     } finally {
       try {
@@ -786,19 +906,82 @@ class ImageProcessor {
     }
   }
 
+  private static centerAndDisplayAscii(asciiOutput: string): void {
+    const lines = asciiOutput.split('\n');
+    const terminalWidth = TerminalUtils.getTerminalWidth();
+
+    lines.forEach(line => {
+      if (line.trim().length === 0) {
+        console.log(); // Preserve empty lines
+        return;
+      }
+
+      // Calculate padding to center the line
+      const padding = Math.max(0, Math.floor((terminalWidth - line.length) / 2));
+      const centeredLine = ' '.repeat(padding) + line;
+      console.log(centeredLine);
+    });
+  }
+
   static async saveImage(
     buffer: Uint8Array,
     slideImage: SlideImage,
     outputDir: string,
   ): Promise<void> {
-    const urlParts = slideImage.url.split("/");
-    const fileName = urlParts[urlParts.length - 1] || `slide-${Date.now()}.jpg`;
-    const savePath = `${outputDir}/${slideImage.source}-${fileName}`;
+    // Clean filename and remove URL parameters
+    let fileName = "";
+    let subDir = "";
+
+    if (slideImage.source === "pexels") {
+      // Extract clean filename from Pexels URL and remove query parameters
+      const urlParts = slideImage.url.split("/");
+      const rawFileName = urlParts[urlParts.length - 1] || `pexels-${Date.now()}.jpg`;
+      // Remove everything after ? to clean URL parameters
+      fileName = rawFileName.split("?")[0];
+      // Ensure it has an extension
+      if (!fileName.includes(".")) {
+        fileName += ".jpg";
+      }
+      subDir = "pexels";
+    } else if (slideImage.source === "waifu") {
+      // Extract filename from Waifu URL
+      const urlParts = slideImage.url.split("/");
+      fileName = urlParts[urlParts.length - 1] || `waifu-${Date.now()}.jpg`;
+      // Remove query parameters if any
+      fileName = fileName.split("?")[0];
+      // Ensure it has an extension
+      if (!fileName.includes(".")) {
+        fileName += ".jpg";
+      }
+      // Determine NSFW or SFW subdirectory
+      const isNsfw = slideImage.isNsfw || slideImage.tags?.some(tag =>
+        ["ass", "hentai", "milf", "oral", "paizuri", "ecchi", "ero"].includes(tag.toLowerCase())
+      ) || false;
+      subDir = `waifus/${isNsfw ? "NSFW" : "SFW"}`;
+    } else {
+      // Default handling for other sources
+      const urlParts = slideImage.url.split("/");
+      fileName = urlParts[urlParts.length - 1] || `slide-${Date.now()}.jpg`;
+      fileName = fileName.split("?")[0]; // Remove query parameters
+      if (!fileName.includes(".")) {
+        fileName += ".jpg";
+      }
+      subDir = slideImage.source;
+    }
+
+    // Create the full directory path
+    const fullDir = subDir ? `${outputDir}/${subDir}` : outputDir;
+    const savePath = `${fullDir}/${fileName}`;
 
     try {
+      // Create directory if it doesn't exist
+      await Deno.mkdir(fullDir, { recursive: true });
+
+      // Check if file already exists
       await Deno.stat(savePath);
       Logger.debug(`Image already exists: ${savePath}`);
     } catch {
+      // File doesn't exist, save it
       await Deno.writeFile(savePath, buffer);
       Logger.success(`Saved image: ${savePath}`);
     }
@@ -812,6 +995,14 @@ class TerminalUtils {
       return Deno.consoleSize().columns;
     } catch {
       return 80; // fallback width
+    }
+  }
+
+  static getTerminalSize(): { rows: number; columns: number } {
+    try {
+      return Deno.consoleSize();
+    } catch {
+      return { rows: 24, columns: 80 }; // fallback size
     }
   }
 
@@ -865,40 +1056,97 @@ class TerminalUtils {
 
     console.log(brightCyan(separator) + "\n");
   }
+}
 
-  static async displayProgressBar(
-    totalSeconds: number,
-    _message: string,
-  ): Promise<void> {
-    const terminalWidth = this.getTerminalWidth();
-    const barWidth = Math.min(60, Math.floor(terminalWidth * 0.6));
-    const updateInterval = 10; // ms
-    const totalUpdates = (totalSeconds * 1000) / updateInterval;
+// Keyboard input handling
+class KeyboardHandler {
+  private listeners: Map<string, () => void> = new Map();
+  private isListening = false;
 
-    for (let i = 0; i <= totalUpdates; i++) {
-      const progress = i / totalUpdates;
-      const filledWidth = Math.floor(progress * barWidth);
-      const emptyWidth = barWidth - filledWidth;
+  constructor() {
+    this.setupRawMode();
+  }
 
-      let bar = "";
-      for (let j = 0; j < filledWidth; j++) {
-        bar += bgBrightWhite("█");
+  private setupRawMode(): void {
+    try {
+      // Enable raw mode to capture individual key presses
+      Deno.stdin.setRaw(true, { cbreak: true });
+      this.isListening = true;
+      this.startListening();
+    } catch {
+      Logger.warn("Failed to enable raw mode for keyboard input");
+    }
+  }
+
+  private async startListening(): Promise<void> {
+    const buffer = new Uint8Array(3);
+    while (this.isListening) {
+      try {
+        const nread = await Deno.stdin.read(buffer);
+        if (nread === null) break;
+
+        const key = this.parseKeyPress(buffer.slice(0, nread));
+        if (key && this.listeners.has(key)) {
+          this.listeners.get(key)!();
+        }
+      } catch {
+        // Handle read errors gracefully
+        break;
       }
+    }
+  }
 
-      bar += "░".repeat(emptyWidth);
+  private parseKeyPress(buffer: Uint8Array): string | null {
+    if (buffer.length === 0) return null;
 
-      const padding = Math.floor((terminalWidth - barWidth) / 2);
-      const centeredBar = " ".repeat(padding) + bar;
+    // Handle single character keys
+    if (buffer.length === 1) {
+      const char = String.fromCharCode(buffer[0]);
 
-      const encoder = new TextEncoder();
-      await Deno.stdout.write(encoder.encode(`\r${centeredBar}`));
-
-      if (i < totalUpdates) {
-        await new Promise((resolve) => setTimeout(resolve, updateInterval));
+      // Handle special cases
+      switch (buffer[0]) {
+        case 27: return 'escape';
+        case 32: return 'space';
+        case 13: return 'enter';
+        case 127: return 'backspace';
+        case 3: return 'ctrl+c';
+        default:
+          if (buffer[0] >= 32 && buffer[0] <= 126) {
+            return char.toLowerCase();
+          }
+          return null;
       }
     }
 
-    console.log();
+    // Handle escape sequences (arrow keys, etc.)
+    if (buffer.length >= 3 && buffer[0] === 27 && buffer[1] === 91) {
+      switch (buffer[2]) {
+        case 65: return 'arrow-up';
+        case 66: return 'arrow-down';
+        case 67: return 'arrow-right';
+        case 68: return 'arrow-left';
+        default: return null;
+      }
+    }
+
+    return null;
+  }
+
+  on(key: string, callback: () => void): void {
+    this.listeners.set(key, callback);
+  }
+
+  off(key: string): void {
+    this.listeners.delete(key);
+  }
+
+  destroy(): void {
+    this.isListening = false;
+    try {
+      Deno.stdin.setRaw(false);
+    } catch {
+      // Ignore errors when disabling raw mode
+    }
   }
 }
 
@@ -906,22 +1154,80 @@ class TerminalUtils {
 class TTYSlide {
   private config: Config;
   private isRunning = true;
+  private isPaused = false;
+  private skipRequested = false;
+  private saveRequested = false;
+  private currentSlideImage: SlideImage | null = null;
+  private currentImageBuffer: Uint8Array | null = null;
+  private keyboardHandler: KeyboardHandler;
 
   constructor(config: Config) {
     this.config = config;
+    this.keyboardHandler = new KeyboardHandler();
     this.setupSignalHandlers();
+    this.setupKeyboardHandlers();
   }
 
   private setupSignalHandlers(): void {
     Deno.addSignalListener("SIGINT", () => {
       Logger.info("Received SIGINT, shutting down gracefully...");
+      this.cleanup();
       Deno.exit(0);
     });
+  }
+
+  private setupKeyboardHandlers(): void {
+    // Space key: Pause/Resume
+    this.keyboardHandler.on('space', () => {
+      this.isPaused = !this.isPaused;
+      // No console.log here - state change will be reflected in progress bar
+    });
+
+    // N key or Right arrow: Skip to next slide
+    this.keyboardHandler.on('n', () => {
+      this.skipRequested = true;
+      // No console.log here - skip will happen immediately
+    });
+
+    this.keyboardHandler.on('arrow-right', () => {
+      this.skipRequested = true;
+      // No console.log here - skip will happen immediately
+    });
+
+    // S key: Save current slide (even in --no-save mode)
+    this.keyboardHandler.on('s', () => {
+      this.saveRequested = true;
+      // No console.log here - save will happen at end of slide cycle
+    });
+
+    // Q key: Quit
+    this.keyboardHandler.on('q', () => {
+      this.cleanup();
+      Deno.exit(0);
+    });
+
+    // Ctrl+C: Also quit (backup)
+    this.keyboardHandler.on('ctrl+c', () => {
+      this.cleanup();
+      Deno.exit(0);
+    });
+  }
+
+  private cleanup(): void {
+    this.isRunning = false;
+    this.keyboardHandler.destroy();
+    // Clear terminal on exit
+    console.clear();
   }
 
   async run(): Promise<void> {
     Logger.info("Starting TTY Slide...");
     Logger.info(`Configuration: ${JSON.stringify(this.config, null, 2)}`);
+
+    // Clear screen and show keyboard controls
+    console.clear();
+    console.log(brightCyan("🎮 TTY Slide - Keyboard Controls:"));
+    console.log(`${green("SPACE")} - Pause/Resume | ${green("N/→")} - Skip | ${green("S")} - Save | ${green("Q")} - Quit\n`);
 
     // Ensure output directory exists
     try {
@@ -936,6 +1242,10 @@ class TTYSlide {
 
     while (this.isRunning) {
       try {
+        // Reset control flags
+        this.skipRequested = false;
+        this.saveRequested = false;
+
         let fetcher: ImageFetcher | null;
 
         if (this.config.source === "random") {
@@ -964,6 +1274,10 @@ class TTYSlide {
           this.config.timeout,
         );
 
+        // Store current slide for save functionality
+        this.currentSlideImage = slideImage;
+        this.currentImageBuffer = imageBuffer;
+
         await ImageProcessor.displayImage(imageBuffer, this.config);
 
         if (this.config.caption) {
@@ -979,11 +1293,30 @@ class TTYSlide {
         }
 
         if (this.isRunning) {
-          await TerminalUtils.displayProgressBar(
-            this.config.intervalSeconds,
-            "Next image in",
-          );
+          await this.handleProgressBarWithControls();
         }
+
+        // Handle save request if triggered during this slide
+        if (this.saveRequested && this.currentSlideImage && this.currentImageBuffer) {
+          try {
+            await ImageProcessor.saveImage(
+              this.currentImageBuffer,
+              this.currentSlideImage,
+              this.config.outputDir,
+            );
+            // Save success - no console.log to avoid shifting image
+          } catch {
+            // Save failed - no console.log to avoid shifting image
+          }
+        }
+
+        // Clear screen for next image (if not paused or skipped)
+        if (this.isRunning && !this.isPaused) {
+          console.clear();
+          console.log(brightCyan("🎮 TTY Slide - Keyboard Controls:"));
+          console.log(`${green("SPACE")} - Pause/Resume | ${green("N/→")} - Skip | ${green("S")} - Save | ${green("Q")} - Quit\n`);
+        }
+
       } catch (error) {
         Logger.error("Unexpected error in main loop", error as Error);
         await this.sleep(5000);
@@ -991,6 +1324,7 @@ class TTYSlide {
     }
 
     Logger.info("TTY Slide shut down complete");
+    this.cleanup();
   }
 
   private async sleep(ms: number): Promise<void> {
@@ -1000,6 +1334,72 @@ class TTYSlide {
       await new Promise((resolve) => setTimeout(resolve, sleepTime));
       remaining -= sleepTime;
     }
+  }
+
+  private async handleProgressBarWithControls(): Promise<void> {
+    const terminalWidth = TerminalUtils.getTerminalWidth();
+    const barWidth = Math.min(60, Math.floor(terminalWidth * 0.6));
+    const updateInterval = 100; // Update every 100ms
+    const totalUpdates = (this.config.intervalSeconds * 1000) / updateInterval;
+
+    // Move cursor to a new line before starting progress bar
+    console.log();
+
+    let currentUpdate = 0;
+
+    while (currentUpdate <= totalUpdates && this.isRunning && !this.skipRequested) {
+      const encoder = new TextEncoder();
+      const progress = currentUpdate / totalUpdates;
+      const filledWidth = Math.floor(progress * (barWidth - 4)); // Reserve 4 chars for play/pause indicator
+      const emptyWidth = (barWidth - 4) - filledWidth;
+
+      // Check if paused and create appropriate state indicator
+      let stateIndicator: string;
+      if (this.isPaused) {
+        // ASCII pause symbol: two vertical bars "||"
+        stateIndicator = yellow("⏸");
+      } else {
+        // ASCII play symbol: triangle ">"
+        stateIndicator = green("▶");
+      }
+
+      // Build progress bar
+      let bar = "";
+      for (let j = 0; j < filledWidth; j++) {
+        bar += bgBrightWhite("█");
+      }
+      bar += "░".repeat(emptyWidth);
+
+      // Combine state indicator with progress bar
+      const fullBar = stateIndicator + " " + bar;
+
+      // Calculate fixed padding to center the bar
+      const totalBarLength = 3 + barWidth - 4; // 3 chars for indicator + space, plus actual bar width
+      const padding = Math.max(0, Math.floor((terminalWidth - totalBarLength) / 2));
+      const centeredBar = " ".repeat(padding) + fullBar;
+
+      // Write the progress bar (always overwrite the same line)
+      await Deno.stdout.write(encoder.encode(`\r${centeredBar}`));
+
+      // If paused, wait without incrementing progress
+      if (this.isPaused) {
+        while (this.isPaused && this.isRunning && !this.skipRequested) {
+          await new Promise((resolve) => setTimeout(resolve, updateInterval));
+        }
+      } else {
+        currentUpdate++;
+        if (currentUpdate <= totalUpdates) {
+          await new Promise((resolve) => setTimeout(resolve, updateInterval));
+        }
+      }
+
+      // Break if skip requested or not running
+      if (this.skipRequested || !this.isRunning) {
+        break;
+      }
+    }
+
+    console.log(); // Move to new line after progress bar completes
   }
 }
 
@@ -1019,14 +1419,23 @@ ${yellow("(Waifu API, Pexels API, etc.) and displays them using jp2a.")}
 
 ${bold(brightCyan("Usage:"))}
 
+${bold("Method 1 (Recommended):")}
 ${white("deno run --allow-net --allow-read --allow-write --allow-run --allow-env")} ${
     bold("tty-slide.ts")
   } ${green("[options]")}
 
-${bold("OR")}
+${bold("Method 2 (With deno.json configuration):")}
+${white("chmod +x tty-slide.ts && ./")}${bold("tty-slide.ts")} ${green("[options]")}
 
-${white("chmod +x tty-slide.ts")}
-${white("./")}${bold("tty-slide.ts")} ${green("[options]")}
+${bold("Method 3 (Using deno task, if configured):")}
+${white("deno task tty-slide")} ${green("[options]")}
+
+${bold(brightCyan("Keyboard Controls:"))}
+  ${green("SPACE")}              ${white("Pause/Resume slideshow")}
+  ${green("N / →")}               ${white("Skip to next slide immediately")}
+  ${green("S")}                  ${white("Save current slide (works even with --no-save)")}
+  ${green("Q")}                  ${white("Quit slideshow")}
+  ${green("Ctrl+C")}             ${white("Force quit")}
 
 ${bold(brightCyan("Options:"))}
   ${green("--source=SOURCE")}    ${
@@ -1040,7 +1449,7 @@ ${bold(brightCyan("Options:"))}
   } ${brightRed("(default: 10)")}
   ${green("--dir=DIR")}          ${
     white("Set output directory for saved images")
-  } ${brightRed("(default: ./slides)")}
+  } ${brightRed("(default: ~/Pictures/TTY-Slides or ./slides)")}
   ${green("--no-save")}          ${white("Do not save images to disk")}
   ${green("--tags=TAG1,TAG2")}   ${
     white("Search tags (waifu) or query terms (pexels)")
@@ -1048,7 +1457,7 @@ ${bold(brightCyan("Options:"))}
   ${green("--colors")}           ${white("Display image in color")} ${
     yellow("(requires jp2a)")
   }
-  ${green("--fill")}             ${white("Fill the terminal with the image")} ${
+  ${green("--fill")}             ${white("Fill ASCII art background with ANSI color")} ${
     yellow("(requires jp2a)")
   }
   ${green("--caption")}          ${
@@ -1131,7 +1540,7 @@ async function main(): Promise<void> {
     await DependencyChecker.checkAllDependencies();
 
     // Parse configuration
-    const config = ConfigManager.parseArgs();
+    const config = await ConfigManager.parseArgs();
 
     // Start the application
     const app = new TTYSlide(config);
