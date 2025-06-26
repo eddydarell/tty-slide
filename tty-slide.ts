@@ -26,7 +26,7 @@
  *
  * @author Eddy Ntambwe <eddydarell@gmail.com>
  * @license GNU General Public License v2.0
- * @version 1.1.0
+ * @version 1.1.2
  */
 
 import {
@@ -40,6 +40,8 @@ import {
   bold,
   brightCyan,
   brightRed,
+  brightYellow,
+  dim,
   green,
   red,
   white,
@@ -782,6 +784,60 @@ class FetcherRegistry {
   }
 }
 
+// Loading animation class
+class LoadingAnimation {
+  private static isRunning = false;
+  private static intervalId: number | null = null;
+  private static frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+  private static currentFrame = 0;
+
+  static start(message = "Loading..."): void {
+    if (this.isRunning) return;
+
+    this.isRunning = true;
+    this.currentFrame = 0;
+
+    // Hide cursor
+    Deno.stdout.writeSync(new TextEncoder().encode("\x1b[?25l"));
+
+    this.intervalId = setInterval(() => {
+      const terminalWidth = TerminalUtils.getTerminalWidth();
+      const spinner = brightCyan(this.frames[this.currentFrame]);
+      const text = `${spinner} ${white(message)}`;
+      const padding = Math.max(0, Math.floor((terminalWidth - message.length - 2) / 2));
+      const centeredText = " ".repeat(padding) + text;
+
+      // Clear current line and write centered loading text
+      Deno.stdout.writeSync(new TextEncoder().encode(`\r\x1b[K${centeredText}`));
+
+      this.currentFrame = (this.currentFrame + 1) % this.frames.length;
+    }, 80);
+  }
+
+  static stop(): void {
+    if (!this.isRunning) return;
+
+    this.isRunning = false;
+
+    if (this.intervalId !== null) {
+      clearInterval(this.intervalId);
+      this.intervalId = null;
+    }
+
+    // Clear the current line thoroughly and show cursor
+    // \r moves to beginning of line, \x1b[K clears from cursor to end of line
+    // \x1b[2K clears the entire line, \x1b[?25h shows cursor
+    Deno.stdout.writeSync(new TextEncoder().encode("\r\x1b[2K\x1b[?25h"));
+  }
+
+  static updateMessage(_message: string): void {
+    if (!this.isRunning) return;
+
+    // The interval will pick up the new message on next update
+    // For immediate update, we could store the message in a class property
+  }
+}
+
 // Image processor and display manager
 class ImageProcessor {
   static async downloadImage(
@@ -851,9 +907,22 @@ class ImageProcessor {
       const terminalSize = TerminalUtils.getTerminalSize();
       const reservedLines = 3; // Controls header + progress bar + padding
       const availableHeight = Math.max(10, terminalSize.rows - reservedLines);
+      const availableWidth = Math.max(40, terminalSize.columns - 4); // Reserve 2 chars padding on each side
 
-      // Use manual sizing to preserve top content and fit available space
-      args.push("--height=" + availableHeight);
+      // Calculate aspect ratios to determine the best fit strategy
+      const terminalAspectRatio = availableWidth / availableHeight;
+
+      // Use a threshold to determine if we should constrain by width or height
+      // For most terminals, width is typically 2-3x the height in character terms
+      // If terminal is very wide (landscape-like), constrain by height to avoid tiny images
+      // If terminal is tall/square, constrain by width to fit properly
+      if (terminalAspectRatio > 2.5) {
+        // Wide terminal: constrain by height, let width adjust proportionally
+        args.push("--height=" + availableHeight);
+      } else {
+        // Tall/square terminal: constrain by width, let height adjust proportionally
+        args.push("--width=" + availableWidth);
+      }
 
       if (config.fill) {
         // jp2a --fill flag: fills background of ASCII art with ANSI color
@@ -864,38 +933,44 @@ class ImageProcessor {
 
       Logger.debug(`jp2a command: jp2a ${args.join(" ")}`);
 
-      if (supportsCenterFlag) {
-        // Let jp2a handle everything (centering, sizing) and output directly to terminal
-        const jp2a = new Deno.Command("jp2a", {
-          args: args,
-          stdout: "inherit", // Direct output to terminal for best sizing
-          stderr: "piped",
-        });
+      try {
+        if (supportsCenterFlag) {
+          // Let jp2a handle everything (centering, sizing) and output directly to terminal
+          const jp2a = new Deno.Command("jp2a", {
+            args: args,
+            stdout: "inherit", // Direct output to terminal for best sizing
+            stderr: "piped",
+          });
 
-        const output = await jp2a.output();
+          const output = await jp2a.output();
 
-        if (output.code !== 0) {
-          const errorText = new TextDecoder().decode(output.stderr);
-          throw new Error(`jp2a failed: ${errorText}`);
+          if (output.code !== 0) {
+            const errorText = new TextDecoder().decode(output.stderr);
+            throw new Error(`jp2a failed with exit code ${output.code}: ${errorText}`);
+          }
+        } else {
+          // For older jp2a versions, capture output and center manually
+          const jp2a = new Deno.Command("jp2a", {
+            args: args,
+            stdout: "piped",
+            stderr: "piped",
+          });
+
+          const output = await jp2a.output();
+
+          if (output.code !== 0) {
+            const errorText = new TextDecoder().decode(output.stderr);
+            throw new Error(`jp2a failed with exit code ${output.code}: ${errorText}`);
+          }
+
+          // Get the ASCII output and center it manually
+          const asciiOutput = new TextDecoder().decode(output.stdout);
+          this.centerAndDisplayAscii(asciiOutput);
         }
-      } else {
-        // For older jp2a versions, capture output and center manually
-        const jp2a = new Deno.Command("jp2a", {
-          args: args,
-          stdout: "piped",
-          stderr: "piped",
-        });
-
-        const output = await jp2a.output();
-
-        if (output.code !== 0) {
-          const errorText = new TextDecoder().decode(output.stderr);
-          throw new Error(`jp2a failed: ${errorText}`);
-        }
-
-        // Get the ASCII output and center it manually
-        const asciiOutput = new TextDecoder().decode(output.stdout);
-        this.centerAndDisplayAscii(asciiOutput);
+      } catch (error) {
+        // Graceful error handling for jp2a failures
+        this.displayErrorMessage(error as Error, config);
+        throw error; // Re-throw to let caller handle continuation
       }
     } finally {
       try {
@@ -904,6 +979,60 @@ class ImageProcessor {
         // Ignore cleanup errors
       }
     }
+  }
+
+  private static displayErrorMessage(error: Error, _config: Config): void {
+    const terminalSize = TerminalUtils.getTerminalSize();
+    const terminalWidth = terminalSize.columns;
+
+    // Clear screen but keep the header
+    console.clear();
+    console.log(brightCyan("🎮 TTY Slide - Keyboard Controls:"));
+    console.log(`${green("SPACE")} - Pause/Resume | ${green("N/→")} - Skip | ${green("S")} - Save | ${green("Q")} - Quit\n`);
+
+    // Create error display
+    const errorLines = [
+      "❌ Failed to convert image to ASCII art",
+      "",
+      "Possible causes:",
+      "• Corrupted or unsupported image format",
+      "• jp2a encountered an internal error",
+      "• Insufficient system resources",
+      "",
+      "The slideshow will continue with the next image...",
+      "",
+      `Error details: ${error.message}`,
+    ];
+
+    // Center the error message
+    const maxLineLength = Math.max(...errorLines.map(line => line.length));
+    const padding = Math.max(0, Math.floor((terminalWidth - maxLineLength) / 2));
+
+    // Add some vertical padding
+    console.log("\n".repeat(Math.floor(terminalSize.rows / 4)));
+
+    errorLines.forEach(line => {
+      if (line === "") {
+        console.log();
+        return;
+      }
+
+      let coloredLine = line;
+      if (line.startsWith("❌")) {
+        coloredLine = red(line);
+      } else if (line.startsWith("•")) {
+        coloredLine = yellow(line);
+      } else if (line.startsWith("The slideshow")) {
+        coloredLine = green(line);
+      } else if (line.startsWith("Error details:")) {
+        coloredLine = dim(line);
+      } else if (line === "Possible causes:") {
+        coloredLine = brightYellow(line);
+      }
+
+      const centeredLine = " ".repeat(padding) + coloredLine;
+      console.log(centeredLine);
+    });
   }
 
   private static centerAndDisplayAscii(asciiOutput: string): void {
@@ -1215,6 +1344,7 @@ class TTYSlide {
 
   private cleanup(): void {
     this.isRunning = false;
+    LoadingAnimation.stop(); // Ensure loading animation is stopped
     this.keyboardHandler.destroy();
     // Clear terminal on exit
     console.clear();
@@ -1246,6 +1376,9 @@ class TTYSlide {
         this.skipRequested = false;
         this.saveRequested = false;
 
+        // Start loading animation
+        LoadingAnimation.start("Fetching image...");
+
         let fetcher: ImageFetcher | null;
 
         if (this.config.source === "random") {
@@ -1256,6 +1389,7 @@ class TTYSlide {
         }
 
         if (!fetcher) {
+          LoadingAnimation.stop();
           Logger.error(`Unknown source: ${this.config.source}`);
           await this.sleep(5000);
           continue;
@@ -1264,21 +1398,61 @@ class TTYSlide {
         const slideImage = await fetcher.fetchRandomImage(this.config);
 
         if (!slideImage) {
+          LoadingAnimation.stop();
           Logger.warn("Failed to fetch image, retrying in 5 seconds...");
           await this.sleep(5000);
           continue;
         }
+
+        // Check if skip was requested during fetch
+        if (this.skipRequested) {
+          LoadingAnimation.stop();
+          continue;
+        }
+
+        // Update loading message for download phase
+        LoadingAnimation.start("Downloading image...");
 
         const imageBuffer = await ImageProcessor.downloadImage(
           slideImage.url,
           this.config.timeout,
         );
 
+        // Check if skip was requested during download
+        if (this.skipRequested) {
+          LoadingAnimation.stop();
+          continue;
+        }
+
+        // Update loading message for processing phase
+        LoadingAnimation.start("Converting to ASCII art...");
+
         // Store current slide for save functionality
         this.currentSlideImage = slideImage;
         this.currentImageBuffer = imageBuffer;
 
-        await ImageProcessor.displayImage(imageBuffer, this.config);
+        try {
+          // Stop loading animation and clear screen before displaying image
+          LoadingAnimation.stop();
+          console.clear();
+          console.log(brightCyan("🎮 TTY Slide - Keyboard Controls:"));
+          console.log(`${green("SPACE")} - Pause/Resume | ${green("N/→")} - Skip | ${green("S")} - Save | ${green("Q")} - Quit\n`);
+
+          await ImageProcessor.displayImage(imageBuffer, this.config);
+        } catch (error) {
+          LoadingAnimation.stop(); // Stop loading animation on error
+
+          // Check if this is a jp2a error we should handle gracefully
+          if (error instanceof Error && error.message.includes("jp2a failed")) {
+            Logger.warn(`Image conversion failed: ${error.message}`);
+            // Wait a moment to let user see the error message
+            await this.sleep(3000);
+            continue; // Skip to next image
+          } else {
+            // Re-throw other types of errors
+            throw error;
+          }
+        }
 
         if (this.config.caption) {
           TerminalUtils.displayCaption(slideImage);
@@ -1318,6 +1492,7 @@ class TTYSlide {
         }
 
       } catch (error) {
+        LoadingAnimation.stop(); // Ensure loading animation is stopped on any error
         Logger.error("Unexpected error in main loop", error as Error);
         await this.sleep(5000);
       }
