@@ -17,6 +17,10 @@ A powerful terminal-based slideshow that fetches images from multiple APIs (Waif
 - 📊 **Visual Progress Bar**: Live progress indication with play/pause status
 - 🔧 **Cross-Platform Compatibility**: Works on macOS, Linux, and Windows
 - ⚡ **jp2a Version Detection**: Automatic compatibility handling for older jp2a versions
+- 🔄 **Loading Animation**: Elegant centered spinner while fetching and processing images
+- 🛡️ **Robust Error Handling**: Graceful handling of download failures and corrupted images
+- 📐 **Smart Aspect Ratio**: Intelligent image sizing that maintains aspect ratios
+- 🧹 **Clean Display**: Automatic cleanup of loading artifacts for pristine slide display
 
 ## Requirements
 
@@ -60,7 +64,23 @@ sudo pacman -S jp2a
 
 ## Interactive Controls
 
-TTY-Slide now features **real-time keyboard controls** for an interactive slideshow experience:
+TTY-Slide features **real-time keyboard controls** for an interactive slideshow experience with visual feedback and smooth transitions:
+
+### Loading Animation
+
+- **Elegant Spinner**: A centered loading animation appears while fetching and processing images
+- **Progress Indication**: Visual feedback during download, conversion, and display preparation
+- **Clean Transitions**: Loading animation is automatically cleared before each slide displays
+- **Skip Responsiveness**: Loading can be interrupted by user controls (skip/quit)
+
+### Visual Experience
+
+- **Smart Aspect Ratio**: Images are intelligently sized to maintain proper proportions:
+  - **Portrait images**: Fit to terminal height for optimal viewing
+  - **Landscape images**: Fit to terminal width to maximize display area
+  - **Square images**: Fit to the shorter terminal dimension for balanced display
+- **Clean Display**: Automatic terminal clearing between slides prevents visual artifacts
+- **Error Recovery**: Graceful handling of corrupted or unavailable images with user-friendly messages
 
 ### Keyboard Controls
 
@@ -79,6 +99,7 @@ TTY-Slide now features **real-time keyboard controls** for an interactive slides
 - **Save Override**: Use `S` to save individual slides even when `--no-save` is enabled
 - **Graceful Exit**: Proper terminal cleanup on all exit methods
 - **Non-disruptive**: Controls don't interfere with image display or progress bar
+- **Loading Interruption**: Skip or quit commands work even during image loading phases
 
 ## Usage
 
@@ -232,24 +253,50 @@ deno run --allow-net --allow-read --allow-write --allow-run --allow-env tty-slid
 ## Examples
 
 ```bash
-# Interactive colorful nature slideshow from Pexels
+# Interactive colorful nature slideshow from Pexels with loading animation
 ./tty-slide.ts --source=pexels --tags=nature,sunset --colors --caption --interval=8
 
-# Interactive anime characters with captions and pause/skip controls
+# Interactive anime characters with loading feedback and error handling
 ./tty-slide.ts --source=waifu --tags=maid,uniform --caption --colors
 
-# Display your personal photo collection with interactive controls
+# Display your personal photo collection with smart aspect ratio handling
 ./tty-slide.ts --source=./my-photos --caption --colors --interval=3
 
-# Browse vacation photos with metadata and interactive navigation
+# Browse vacation photos with metadata and graceful error recovery
 ./tty-slide.ts --source=/Users/username/Pictures/Vacation2024 --caption --fill
 
-# Mixed content slideshow with real-time pause/resume
+# Mixed content slideshow with loading animation and clean transitions
 ./tty-slide.ts --source=random --caption --fill --interval=5
 
-# Quick preview with save-on-demand using 'S' key
+# Quick preview with elegant loading and save-on-demand using 'S' key
 ./tty-slide.ts --no-save --colors --interval=3
 ```
+
+## Technical Features
+
+### Image Processing Enhancements
+
+- **Intelligent Aspect Ratio Logic**: Automatically determines optimal sizing strategy based on image dimensions
+  - Portrait images (height > width): Uses `--height` flag to maximize vertical display
+  - Landscape images (width > height): Uses `--width` flag to maximize horizontal display
+  - Square images (width ≈ height): Uses the shorter terminal dimension for balanced scaling
+- **Terminal Dimension Awareness**: Dynamically calculates available display space accounting for captions and UI elements
+- **jp2a Optimization**: Automatically selects the best jp2a flags for each image type
+
+### Loading & Error Handling
+
+- **Centered Loading Animation**: Elegant spinner that adapts to terminal width with proper positioning
+- **Robust Error Recovery**: Graceful handling of network failures, corrupted images, and jp2a processing errors
+- **Clean State Management**: Ensures loading animations are always cleared before displaying content
+- **User-Friendly Messages**: Clear, centered error messages that don't disrupt the slideshow flow
+- **Interrupt Handling**: Loading phases can be immediately interrupted by user commands
+
+### Display Quality
+
+- **Artifact Prevention**: Comprehensive terminal clearing prevents visual remnants between slides
+- **Cursor Management**: Proper cursor show/hide handling during animations and display
+- **ANSI Sequence Optimization**: Efficient use of terminal control codes for smooth transitions
+- **Cross-Platform Compatibility**: Works consistently across different terminal emulators and operating systems
 
 ## Environment Variables
 
@@ -262,17 +309,33 @@ deno run --allow-net --allow-read --allow-write --allow-run --allow-env tty-slid
 
 ### Common Issues
 
+#### Loading animation or display artifacts
+
+- The loading spinner automatically clears itself before each slide
+- If you see trailing characters, your terminal may not support certain ANSI sequences
+- Try resizing your terminal window to refresh the display
+- Use `Ctrl+L` to manually clear the terminal if needed
+
+#### Image display quality
+
+- **Aspect ratio preservation**: Images automatically fit your terminal dimensions while maintaining proportions
+- **Portrait images**: Optimized for height to show full vertical content
+- **Landscape images**: Optimized for width to maximize horizontal detail
+- **Error handling**: Corrupted or unavailable images show a clear error message and continue the slideshow
+
 #### Keyboard controls not responding
 
 - Ensure your terminal supports raw input mode
 - Try running with `DEBUG=true` to see if key presses are detected
 - Some terminals may require focus to capture keyboard input
+- Loading phases may briefly delay input processing but won't ignore commands
 
 #### Progress bar or display issues
 
 - Make sure your terminal window is large enough (minimum 80x24 recommended)
 - The progress bar shows ▶ when playing and ⏸ when paused
 - Images automatically resize to fit available terminal space
+- Loading animation centers itself based on current terminal width
 
 ### jp2a not found
 
